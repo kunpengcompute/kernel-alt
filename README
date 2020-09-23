@@ -15,4 +15,4 @@ $ cp -f kernel-alt.spec ~/rpmbuild/SPECS/
 $ cd ~/rpmbuild/SPECS/
 $ rpmbuild -bb kernel-alt.spec
 $ cd ~/rpmbuild/RPMS/aarch64
-$ rpm -ivh --force kernel-4.14.0-115.el7.0.1.aarch64.rpm
+$ rpm -ivh kernel-4.14.0-115.el7.0.2.aarch64.rpm
