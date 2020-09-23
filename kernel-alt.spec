@@ -19,7 +19,7 @@ Summary: The Linux kernel
 %define pkgrelease 115.el7a
 
 # allow pkg_release to have configurable %{?dist} tag
-%define specrelease 115%{?dist}.0.1
+%define specrelease 115%{?dist}.0.2
 
 %define pkg_release %{specrelease}%{?buildid}
 
@@ -1760,6 +1760,9 @@ fi\
 %kernel_variant_files %{with_kdump} kdump
 
 %changelog
+* Wed Sep 23 2020 gaozhekang <864647692@qq.com>
+- Add pvsched feature to support vcpu preempt and pvqspinlock
+
 * Tue Nov 13 2018 Johnny Hughes <johnny@centos.org> [4.14.0-49.13.1.el7a]
 - Rolled in CentOS certificates and signed modules with a CentOS certificate.
 - Turned off CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND and turned on CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE on aarch64
