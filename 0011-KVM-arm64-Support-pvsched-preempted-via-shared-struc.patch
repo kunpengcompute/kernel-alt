@@ -1,0 +1,217 @@
+From 8f401614244f2403e091a00670975bde7af078e5 Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Wed, 23 Sep 2020 16:45:46 +0800
+Subject: [PATCH 11/25] KVM: arm64: Support pvsched preempted via shared
+ structure
+
+euleros inclusion
+category: feature
+bugzilla: NA
+DTS: #231
+CVE: NA
+
+--------------------------------
+
+Implement the service call for configuring a shared structure between a
+vCPU and the hypervisor in which the hypervisor can tell the vCPU that is
+running or not.
+---
+ arch/arm/include/asm/kvm_host.h   | 14 ++++++++++++++
+ arch/arm64/include/asm/kvm_host.h | 16 ++++++++++++++++
+ include/linux/kvm_types.h         |  2 ++
+ virt/kvm/arm/arm.c                |  8 ++++++++
+ virt/kvm/arm/hypercalls.c         | 12 ++++++++++++
+ virt/kvm/arm/pvsched.c            | 32 ++++++++++++++++++++++++++++++++
+ 6 files changed, 84 insertions(+)
+
+diff --git a/arch/arm/include/asm/kvm_host.h b/arch/arm/include/asm/kvm_host.h
+index 99c4cf0..d1f829c 100644
+--- a/arch/arm/include/asm/kvm_host.h
++++ b/arch/arm/include/asm/kvm_host.h
+@@ -275,6 +275,20 @@ static inline int kvm_arch_dev_ioctl_check_extension(struct kvm *kvm, long ext)
+ int kvm_perf_init(void);
+ int kvm_perf_teardown(void);
+ 
++static inline void kvm_arm_pvsched_vcpu_init(struct kvm_vcpu_arch *vcpu_arch)
++{
++}
++
++static inline bool kvm_arm_is_pvsched_enabled(struct kvm_vcpu_arch *vcpu_arch)
++{
++	return false;
++}
++
++static inline void kvm_update_pvsched_preempted(struct kvm_vcpu *vcpu,
++						u32 preempted)
++{
++}
++
+ static inline int kvm_hypercall_pvsched_features(struct kvm_vcpu *vcpu)
+ {
+ 	return SMCCC_RET_NOT_SUPPORTED;
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 15dfe2c..678dd16 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -287,6 +287,11 @@ struct kvm_vcpu_arch {
+ 
+ 	/* Virtual SError ESR to restore when HCR_EL2.VSE is set */
+ 	u64 vsesr_el2;
++
++	/* Guest PV sched state */
++	struct {
++		gpa_t base;
++	} pvsched;
+ };
+ 
+ #define vcpu_gp_regs(v)		(&(v)->arch.ctxt.gp_regs)
+@@ -356,6 +361,17 @@ void handle_exit_early(struct kvm_vcpu *vcpu, struct kvm_run *run,
+ int kvm_perf_init(void);
+ int kvm_perf_teardown(void);
+ 
++static inline void kvm_arm_pvsched_vcpu_init(struct kvm_vcpu_arch *vcpu_arch)
++{
++	vcpu_arch->pvsched.base = GPA_INVALID;
++}
++
++static inline bool kvm_arm_is_pvsched_enabled(struct kvm_vcpu_arch *vcpu_arch)
++{
++	return (vcpu_arch->pvsched.base != GPA_INVALID);
++}
++
++void kvm_update_pvsched_preempted(struct kvm_vcpu *vcpu, u32 preempted);
+ int kvm_hypercall_pvsched_features(struct kvm_vcpu *vcpu);
+ 
+ struct kvm_vcpu *kvm_mpidr_to_vcpu(struct kvm *kvm, unsigned long mpidr);
+diff --git a/include/linux/kvm_types.h b/include/linux/kvm_types.h
+index 8bf259d..e66a9c1 100644
+--- a/include/linux/kvm_types.h
++++ b/include/linux/kvm_types.h
+@@ -49,6 +49,8 @@
+ typedef u64            gpa_t;
+ typedef u64            gfn_t;
+ 
++#define GPA_INVALID    (~(gpa_t)0)
++
+ typedef unsigned long  hva_t;
+ typedef u64            hpa_t;
+ typedef u64            hfn_t;
+diff --git a/virt/kvm/arm/arm.c b/virt/kvm/arm/arm.c
+index 9b05bad..80bce6e 100644
+--- a/virt/kvm/arm/arm.c
++++ b/virt/kvm/arm/arm.c
+@@ -336,6 +336,8 @@ int kvm_arch_vcpu_init(struct kvm_vcpu *vcpu)
+ 
+ 	kvm_arm_reset_debug_ptr(vcpu);
+ 
++	kvm_arm_pvsched_vcpu_init(&vcpu->arch);
++
+ 	return kvm_vgic_vcpu_init(vcpu);
+ }
+ 
+@@ -360,6 +362,9 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
+ 	kvm_arm_set_running_vcpu(vcpu);
+ 
+ 	kvm_vgic_load(vcpu);
++
++	if (kvm_arm_is_pvsched_enabled(&vcpu->arch))
++		kvm_update_pvsched_preempted(vcpu, 0);
+ }
+ 
+ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+@@ -370,6 +375,9 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ 
+ 	kvm_arm_set_running_vcpu(NULL);
+ 	kvm_timer_vcpu_put(vcpu);
++
++	if (kvm_arm_is_pvsched_enabled(&vcpu->arch))
++		kvm_update_pvsched_preempted(vcpu, 1);
+ }
+ 
+ static void vcpu_power_off(struct kvm_vcpu *vcpu)
+diff --git a/virt/kvm/arm/hypercalls.c b/virt/kvm/arm/hypercalls.c
+index 780240b..f708b54 100644
+--- a/virt/kvm/arm/hypercalls.c
++++ b/virt/kvm/arm/hypercalls.c
+@@ -14,6 +14,7 @@ int kvm_hvc_call_handler(struct kvm_vcpu *vcpu)
+ 	u32 func_id = smccc_get_function(vcpu);
+ 	u32 val = SMCCC_RET_NOT_SUPPORTED;
+ 	u32 feature;
++	gpa_t gpa;
+ 
+ 	switch (func_id) {
+ 	case ARM_SMCCC_VERSION_FUNC_ID:
+@@ -48,6 +49,17 @@ int kvm_hvc_call_handler(struct kvm_vcpu *vcpu)
+ 	case ARM_SMCCC_HV_PV_SCHED_FEATURES:
+ 		val = kvm_hypercall_pvsched_features(vcpu);
+ 		break;
++	case ARM_SMCCC_HV_PV_SCHED_IPA_INIT:
++		gpa = smccc_get_arg1(vcpu);
++		if (gpa != GPA_INVALID) {
++			vcpu->arch.pvsched.base = gpa;
++			val = SMCCC_RET_SUCCESS;
++		}
++		break;
++	case ARM_SMCCC_HV_PV_SCHED_IPA_RELEASE:
++		vcpu->arch.pvsched.base = GPA_INVALID;
++		val = SMCCC_RET_SUCCESS;
++		break;
+ 	default:
+ 		return kvm_psci_call(vcpu);
+ 	}
+diff --git a/virt/kvm/arm/pvsched.c b/virt/kvm/arm/pvsched.c
+index 40b56e0..8a1302a 100644
+--- a/virt/kvm/arm/pvsched.c
++++ b/virt/kvm/arm/pvsched.c
+@@ -5,9 +5,39 @@
+  */
+ 
+ #include <linux/arm-smccc.h>
++#include <linux/kvm_host.h>
++
++#include <asm/pvsched-abi.h>
+ 
+ #include <kvm/arm_hypercalls.h>
+ 
++void kvm_update_pvsched_preempted(struct kvm_vcpu *vcpu, u32 preempted)
++{
++	__le32 preempted_le;
++	u64 offset;
++	int idx;
++	u64 base = vcpu->arch.pvsched.base;
++	struct kvm *kvm = vcpu->kvm;
++
++	if (base == GPA_INVALID)
++		return;
++
++	preempted_le = cpu_to_le32(preempted);
++
++	/*
++	 * This function is called from atomic context, so we need to
++	 * disable page faults.
++	 */
++	pagefault_disable();
++
++	idx = srcu_read_lock(&kvm->srcu);
++	offset = offsetof(struct pvsched_vcpu_state, preempted);
++	kvm_put_guest(kvm, base + offset, preempted_le, u32);
++	srcu_read_unlock(&kvm->srcu, idx);
++
++	pagefault_enable();
++}
++
+ int kvm_hypercall_pvsched_features(struct kvm_vcpu *vcpu)
+ {
+ 	u32 feature = smccc_get_arg1(vcpu);
+@@ -15,6 +45,8 @@ int kvm_hypercall_pvsched_features(struct kvm_vcpu *vcpu)
+ 
+ 	switch (feature) {
+ 	case ARM_SMCCC_HV_PV_SCHED_FEATURES:
++	case ARM_SMCCC_HV_PV_SCHED_IPA_INIT:
++	case ARM_SMCCC_HV_PV_SCHED_IPA_RELEASE:
+ 		val = SMCCC_RET_SUCCESS;
+ 		break;
+ 	}
+-- 
+1.8.3.1
+

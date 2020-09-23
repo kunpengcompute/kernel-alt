@@ -1,0 +1,51 @@
+From fff4e1cf99d87b3f4ce28cd645e0689150c89b4e Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Tue, 15 Sep 2020 14:41:02 +0800
+Subject: [PATCH 06/25] arm64/spinlock: fix a -Wunused-function warning
+
+mainline inclusion
+from mainline-v5.8-rc5
+commit 345d52c184dc7de98cff63f1bfa6f90e9db19809
+category: bugfix
+bugzilla: NA
+DTS: #231
+CVE: NA
+
+--------------------------------
+
+The commit f5bfdc8e3947 ("locking/osq: Use optimized spinning loop for
+arm64") introduced a warning from Clang because vcpu_is_preempted() is
+compiled away,
+
+kernel/locking/osq_lock.c:25:19: warning: unused function 'node_cpu'
+[-Wunused-function]
+static inline int node_cpu(struct optimistic_spin_node *node)
+                  ^
+1 warning generated.
+
+Fix it by converting vcpu_is_preempted() to a static inline function.
+
+Fixes: f5bfdc8e3947 ("locking/osq: Use optimized spinning loop for arm64")
+---
+ arch/arm64/include/asm/spinlock.h | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/include/asm/spinlock.h b/arch/arm64/include/asm/spinlock.h
+index aa08c06..4d32a43 100644
+--- a/arch/arm64/include/asm/spinlock.h
++++ b/arch/arm64/include/asm/spinlock.h
+@@ -36,6 +36,10 @@
+  * See:
+  * https://lore.kernel.org/lkml/20200110100612.GC2827@hirez.programming.kicks-ass.net
+  */
+-#define vcpu_is_preempted(cpu)	false
++#define vcpu_is_preempted vcpu_is_preempted
++static inline bool vcpu_is_preempted(int cpu)
++{
++	return false;
++}
+ 
+ #endif /* __ASM_SPINLOCK_H */
+-- 
+1.8.3.1
+

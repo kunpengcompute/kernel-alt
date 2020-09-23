@@ -1,0 +1,146 @@
+From b381e8e285011092baa4aeb8548f3123183c5d08 Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Wed, 23 Sep 2020 16:41:14 +0800
+Subject: [PATCH 07/25] KVM: Boost vCPUs that are delivering  interrupts 
+ MIME-Version: 1.0 Content-Type: text/plain; charset=UTF-8 
+ Content-Transfer-Encoding: 8bit
+
+mainline inclusion
+from mainline-v5.8-rc5
+commit d73eb57b80b98ae147e4e6a7d9877c2ba175f972
+category: feature
+bugzilla: NA
+DTS: #231
+CVE: NA
+
+--------------------------------
+
+Inspired by commit 9cac38dd5d (KVM/s390: Set preempted flag during
+vcpu wakeup and interrupt delivery), we want to also boost not just
+lock holders but also vCPUs that are delivering interrupts. Most
+smp_call_function_many calls are synchronous, so the IPI target vCPUs
+are also good yield candidates.  This patch introduces vcpu->ready to
+boost vCPUs during wakeup and interrupt delivery time; unlike s390 we do
+not reuse vcpu->preempted so that voluntarily preempted vCPUs are taken
+into account by kvm_vcpu_on_spin, but vmx_vcpu_pi_put is not affected
+(VT-d PI handles voluntary preemption separately, in pi_pre_block).
+
+Testing on 80 HT 2 socket Xeon Skylake server, with 80 vCPUs VM 80GB RAM:
+ebizzy -M
+
+            vanilla     boosting    improved
+1VM          21443       23520         9%
+2VM           2800        8000       180%
+3VM           1800        3100        72%
+
+Testing on my Haswell desktop 8 HT, with 8 vCPUs VM 8GB RAM, two VMs,
+one running ebizzy -M, the other running 'stress --cpu 2':
+
+w/ boosting + w/o pv sched yield(vanilla)
+
+            vanilla     boosting   improved
+              1570         4000      155%
+
+w/ boosting + w/ pv sched yield(vanilla)
+
+            vanilla     boosting   improved
+              1844         5157      179%
+
+w/o boosting, perf top in VM:
+
+ 72.33%  [kernel]       [k] smp_call_function_many
+  4.22%  [kernel]       [k] call_function_i
+  3.71%  [kernel]       [k] async_page_fault
+
+w/ boosting, perf top in VM:
+
+ 38.43%  [kernel]       [k] smp_call_function_many
+  6.31%  [kernel]       [k] async_page_fault
+  6.13%  libc-2.23.so   [.] __memcpy_avx_unaligned
+  4.88%  [kernel]       [k] call_function_interrupt
+---
+ arch/s390/kvm/interrupt.c |  2 +-
+ include/linux/kvm_host.h  |  1 +
+ virt/kvm/kvm_main.c       | 12 ++++++++----
+ 3 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index 5185be3..9078006 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -1092,7 +1092,7 @@ void kvm_s390_vcpu_wakeup(struct kvm_vcpu *vcpu)
+ 		 * The vcpu gave up the cpu voluntarily, mark it as a good
+ 		 * yield-candidate.
+ 		 */
+-		vcpu->preempted = true;
++		vcpu->ready = true;
+ 		swake_up(&vcpu->wq);
+ 		vcpu->stat.halt_wakeup++;
+ 	}
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 9e6ad99..5ea419a 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -273,6 +273,7 @@ struct kvm_vcpu {
+ 	} spin_loop;
+ #endif
+ 	bool preempted;
++	bool ready;
+ 	struct kvm_vcpu_arch arch;
+ 	struct dentry *debugfs_dentry;
+ };
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 9deb5a2..00850e2 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -290,6 +290,7 @@ int kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
+ 	kvm_vcpu_set_in_spin_loop(vcpu, false);
+ 	kvm_vcpu_set_dy_eligible(vcpu, false);
+ 	vcpu->preempted = false;
++	vcpu->ready = false;
+ 
+ 	r = kvm_arch_vcpu_init(vcpu);
+ 	if (r < 0)
+@@ -2189,6 +2190,7 @@ bool kvm_vcpu_wake_up(struct kvm_vcpu *vcpu)
+ 	wqp = kvm_arch_vcpu_wq(vcpu);
+ 	if (swq_has_sleeper(wqp)) {
+ 		swake_up(wqp);
++		WRITE_ONCE(vcpu->ready, true);
+ 		++vcpu->stat.halt_wakeup;
+ 		return true;
+ 	}
+@@ -2302,7 +2304,7 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *me, bool yield_to_kernel_mode)
+ 				continue;
+ 			} else if (pass && i > last_boosted_vcpu)
+ 				break;
+-			if (!ACCESS_ONCE(vcpu->preempted))
++			if (!READ_ONCE(vcpu->ready))
+ 				continue;
+ 			if (vcpu == me)
+ 				continue;
+@@ -3944,8 +3946,8 @@ static void kvm_sched_in(struct preempt_notifier *pn, int cpu)
+ {
+ 	struct kvm_vcpu *vcpu = preempt_notifier_to_vcpu(pn);
+ 
+-	if (vcpu->preempted)
+-		vcpu->preempted = false;
++	vcpu->preempted = false;
++	WRITE_ONCE(vcpu->ready, false);
+ 
+ 	kvm_arch_sched_in(vcpu, cpu);
+ 
+@@ -3957,8 +3959,10 @@ static void kvm_sched_out(struct preempt_notifier *pn,
+ {
+ 	struct kvm_vcpu *vcpu = preempt_notifier_to_vcpu(pn);
+ 
+-	if (current->state == TASK_RUNNING)
++	if (current->state == TASK_RUNNING) {
+ 		vcpu->preempted = true;
++		WRITE_ONCE(vcpu->ready, true);
++	}
+ 	kvm_arch_vcpu_put(vcpu);
+ }
+ 
+-- 
+1.8.3.1
+

@@ -1,0 +1,77 @@
+From 20409d3157d822cce96fdc87596abc9c1be1953b Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Wed, 23 Sep 2020 16:48:53 +0800
+Subject: [PATCH 14/25] KVM: arm64: Add SMCCC PV-sched to kick cpu
+
+euleros inclusion
+category: feature
+bugzilla: NA
+DTS: #231
+CVE: NA
+
+--------------------------------
+
+A new hypercall interface function is provided for the guest to kick WFI
+state vCPU.
+---
+ Documentation/virtual/kvm/arm/pvsched.txt | 16 ++++++++++++++++
+ include/linux/arm-smccc.h                 |  6 ++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/Documentation/virtual/kvm/arm/pvsched.txt b/Documentation/virtual/kvm/arm/pvsched.txt
+index 1d5aefc..788e63e 100644
+--- a/Documentation/virtual/kvm/arm/pvsched.txt
++++ b/Documentation/virtual/kvm/arm/pvsched.txt
+@@ -9,6 +9,7 @@ Some SMCCC compatible hypercalls are defined:
+ * PV_SCHED_FEATURES:          0xC5000090
+ * PV_SCHED_IPA_INIT:          0xC5000091
+ * PV_SCHED_IPA_RELEASE:       0xC5000092
++* PV_SCHED_KICK_CPU:          0xC5000093
+ 
+ The existence of the PV_SCHED hypercall should be probed using the SMCCC 1.1
+ ARCH_FEATURES mechanism before calling it.
+@@ -36,6 +37,13 @@ PV_SCHED_IPA_RELEASE
+                               this vCPU's PV data structure is released.
+     ============= ========    ==========
+ 
++PV_SCHED_KICK_CPU
++    ============= ========    ==========
++    Function ID:  (uint32)    0xC5000093
++    Return value: (int64)     NOT_SUPPORTED (-1) or SUCCESS (0) if the vCPU is
++                              kicked by the hypervisor.
++    ============= ========    ==========
++
+ PV sched state
+ --------------
+ 
+@@ -54,3 +62,11 @@ The structure pointed to by the PV_SCHED_IPA hypercall is as follows:
+ The preempted field will be updated to 0 by the hypervisor prior to scheduling
+ a vCPU. When the vCPU is scheduled out, the preempted field will be updated
+ to 1 by the hypervisor.
++
++A vCPU of a paravirtualized guest that is busywaiting in guest kernel mode for
++an event to occur (ex: a spinlock to become available) can execute WFI
++instruction once it has busy-waited for more than a threshold time-interval.
++Execution of WFI instruction would cause the hypervisor to put the vCPU to sleep
++until occurrence of an appropriate event. Another vCPU of the same guest can
++wakeup the sleeping vCPU by issuing PV_SCHED_KICK_CPU hypercall, specifying CPU
++id (reg1) of the vCPU to be woken up.
+diff --git a/include/linux/arm-smccc.h b/include/linux/arm-smccc.h
+index e6d26c7..cf3f645 100644
+--- a/include/linux/arm-smccc.h
++++ b/include/linux/arm-smccc.h
+@@ -366,5 +366,11 @@ asmlinkage void __arm_smccc_hvc(unsigned long a0, unsigned long a1,
+ 			   ARM_SMCCC_OWNER_STANDARD_HYP,	\
+ 			   0x92)
+ 
++#define ARM_SMCCC_HV_PV_SCHED_KICK_CPU				\
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,			\
++			   ARM_SMCCC_SMC_64,			\
++			   ARM_SMCCC_OWNER_STANDARD_HYP,	\
++			   0x93)
++
+ #endif /*__ASSEMBLY__*/
+ #endif /*__LINUX_ARM_SMCCC_H*/
+-- 
+1.8.3.1
+

@@ -1,0 +1,60 @@
+From 6d5d9a81d3d2f299186c33fe624c2938262e3527 Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Wed, 23 Sep 2020 16:42:39 +0800
+Subject: [PATCH 08/25] KVM: Check preempted_in_kernel for  involuntary
+ preemption  MIME-Version: 1.0 Content-Type: text/plain; charset=UTF-8 
+ Content-Transfer-Encoding: 8bit
+
+mainline inclusion
+from mainline-v5.8-rc5
+commit 046ddeed0461b5d270470c253cbb321103d048b6
+category: feature
+bugzilla: NA
+DTS: #231
+CVE: NA
+
+--------------------------------
+
+preempted_in_kernel is updated in preempt_notifier when involuntary preemption
+ocurrs, it can be stale when the voluntarily preempted vCPUs are taken into
+account by kvm_vcpu_on_spin() loop. This patch lets it just check preempted_in_kernel
+for involuntary preemption.
+---
+ virt/kvm/kvm_main.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 00850e2..fdfbee8 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -2310,7 +2310,8 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *me, bool yield_to_kernel_mode)
+ 				continue;
+ 			if (swait_active(&vcpu->wq) && !kvm_arch_vcpu_runnable(vcpu))
+ 				continue;
+-			if (yield_to_kernel_mode && !kvm_arch_vcpu_in_kernel(vcpu))
++			if (READ_ONCE(vcpu->preempted) && yield_to_kernel_mode &&
++				!kvm_arch_vcpu_in_kernel(vcpu))
+ 				continue;
+ 			if (!kvm_vcpu_eligible_for_directed_yield(vcpu))
+ 				continue;
+@@ -3946,7 +3947,7 @@ static void kvm_sched_in(struct preempt_notifier *pn, int cpu)
+ {
+ 	struct kvm_vcpu *vcpu = preempt_notifier_to_vcpu(pn);
+ 
+-	vcpu->preempted = false;
++	WRITE_ONCE(vcpu->preempted, false);
+ 	WRITE_ONCE(vcpu->ready, false);
+ 
+ 	kvm_arch_sched_in(vcpu, cpu);
+@@ -3960,7 +3961,7 @@ static void kvm_sched_out(struct preempt_notifier *pn,
+ 	struct kvm_vcpu *vcpu = preempt_notifier_to_vcpu(pn);
+ 
+ 	if (current->state == TASK_RUNNING) {
+-		vcpu->preempted = true;
++		WRITE_ONCE(vcpu->preempted, true);
+ 		WRITE_ONCE(vcpu->ready, true);
+ 	}
+ 	kvm_arch_vcpu_put(vcpu);
+-- 
+1.8.3.1
+

@@ -1,0 +1,117 @@
+From 8e237da403d9d745d01b8a11d2e116f5c4854557 Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Wed, 23 Sep 2020 16:50:20 +0800
+Subject: [PATCH 16/25] qspinlock: CNA: Add ARM64 support
+
+hulk inclusion
+category: feature
+bugzilla: 13227
+CVE: NA
+
+-------------------------------------------------
+
+Enabling CNA is controlled via a new configuration option
+(NUMA_AWARE_SPINLOCKS). Add it for arm64 support.
+---
+ arch/arm64/Kconfig                 | 14 ++++++++++++++
+ arch/arm64/include/asm/Kbuild      |  1 -
+ arch/arm64/include/asm/qspinlock.h | 36 ++++++++++++++++++++++++++++++++++++
+ kernel/locking/qspinlock.c         |  2 +-
+ 4 files changed, 51 insertions(+), 2 deletions(-)
+ create mode 100644 arch/arm64/include/asm/qspinlock.h
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index db83519..e2b6212 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -695,6 +695,20 @@ config NODES_SHIFT
+ 	  Specify the maximum number of NUMA Nodes available on the target
+ 	  system.  Increases memory reserved to accommodate various tables.
+ 
++config NUMA_AWARE_SPINLOCKS
++	bool "Numa-aware spinlocks"
++	depends on NUMA && QUEUED_SPINLOCKS
++	default n
++	help
++	  Introduce NUMA (Non Uniform Memory Access) awareness into
++	  the slow path of spinlocks.
++
++	  The kernel will try to keep the lock on the same node,
++	  thus reducing the number of remote cache misses, while
++	  trading some of the short term fairness for better performance.
++
++	  Say N if you want absolute first come first serve fairness.
++
+ config USE_PERCPU_NUMA_NODE_ID
+ 	def_bool y
+ 	depends on NUMA
+diff --git a/arch/arm64/include/asm/Kbuild b/arch/arm64/include/asm/Kbuild
+index ae621cb..e63d0a8 100644
+--- a/arch/arm64/include/asm/Kbuild
++++ b/arch/arm64/include/asm/Kbuild
+@@ -17,7 +17,6 @@ generic-y += mm-arch-hooks.h
+ generic-y += msi.h
+ generic-y += preempt.h
+ generic-y += qrwlock.h
+-generic-y += qspinlock.h
+ generic-y += rwsem.h
+ generic-y += segment.h
+ generic-y += serial.h
+diff --git a/arch/arm64/include/asm/qspinlock.h b/arch/arm64/include/asm/qspinlock.h
+new file mode 100644
+index 0000000..1d35bc7
+--- /dev/null
++++ b/arch/arm64/include/asm/qspinlock.h
+@@ -0,0 +1,36 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_ARM64_QSPINLOCK_H
++#define _ASM_ARM64_QSPINLOCK_H
++
++#ifdef CONFIG_NUMA_AWARE_SPINLOCKS
++#include <asm-generic/qspinlock_types.h>
++
++extern void __cna_queued_spin_lock_slowpath(struct qspinlock *lock, u32 val);
++extern void native_queued_spin_lock_slowpath(struct qspinlock *lock, u32 val);
++
++#define	queued_spin_unlock queued_spin_unlock
++/**
++ * queued_spin_unlock - release a queued spinlock
++ * @lock : Pointer to queued spinlock structure
++ *
++ * A smp_store_release() on the least-significant byte.
++ */
++static inline void native_queued_spin_unlock(struct qspinlock *lock)
++{
++	smp_store_release(&lock->locked, 0);
++}
++
++static inline void queued_spin_lock_slowpath(struct qspinlock *lock, u32 val)
++{
++	__cna_queued_spin_lock_slowpath(lock, val);
++}
++
++static inline void queued_spin_unlock(struct qspinlock *lock)
++{
++	native_queued_spin_unlock(lock);
++}
++#endif
++
++#include <asm-generic/qspinlock.h>
++
++#endif /* _ASM_ARM64_QSPINLOCK_H */
+diff --git a/kernel/locking/qspinlock.c b/kernel/locking/qspinlock.c
+index 294294c..6179012 100644
+--- a/kernel/locking/qspinlock.c
++++ b/kernel/locking/qspinlock.c
+@@ -264,7 +264,7 @@ static __always_inline u32  __pv_wait_head_or_lock(struct qspinlock *lock,
+ #define pv_kick_node		__pv_kick_node
+ #define pv_wait_head_or_lock	__pv_wait_head_or_lock
+ 
+-#ifdef CONFIG_PARAVIRT_SPINLOCKS
++#if defined(CONFIG_PARAVIRT_SPINLOCKS) || defined(CONFIG_NUMA_AWARE_SPINLOCKS)
+ #define queued_spin_lock_slowpath	native_queued_spin_lock_slowpath
+ #endif
+ 
+-- 
+1.8.3.1
+

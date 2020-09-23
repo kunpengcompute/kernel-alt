@@ -1,0 +1,41 @@
+From 9c00b8b7b5f49d0d461ae47555b338489b4e11d0 Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Wed, 23 Sep 2020 16:58:47 +0800
+Subject: [PATCH 23/25] locking/qspinlock: Fix build for anonymous union in
+ older GCC compilers
+
+One of my tests compiles the kernel with gcc 4.5.3, and I hit the
+following build error:
+
+  include/linux/semaphore.h: In function 'sema_init':
+  include/linux/semaphore.h:35:17: error: unknown field 'val' specified in initializer
+  include/linux/semaphore.h:35:17: warning: missing braces around initializer
+  include/linux/semaphore.h:35:17: warning: (near initialization for '(anonymous).raw_lock.<anonymous>.val')
+
+I bisected it down to:
+
+ 625e88be1f41 ("locking/qspinlock: Merge 'struct __qspinlock' into 'struct qspinlock'")
+
+... which makes qspinlock have an anonymous union, which makes initializing it special
+for older compilers. By adding strategic brackets, it makes the build
+happy again.
+---
+ include/asm-generic/qspinlock_types.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/asm-generic/qspinlock_types.h b/include/asm-generic/qspinlock_types.h
+index 0763f06..d10f1e7 100644
+--- a/include/asm-generic/qspinlock_types.h
++++ b/include/asm-generic/qspinlock_types.h
+@@ -63,7 +63,7 @@
+ /*
+  * Initializier
+  */
+-#define	__ARCH_SPIN_LOCK_UNLOCKED	{ .val = ATOMIC_INIT(0) }
++#define	__ARCH_SPIN_LOCK_UNLOCKED	{ { .val = ATOMIC_INIT(0) } }
+ 
+ /*
+  * Bitfields in the atomic value:
+-- 
+1.8.3.1
+

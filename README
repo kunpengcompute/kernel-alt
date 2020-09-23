@@ -1,0 +1,18 @@
+This repo should be used as following steps:
+# Download kernel-alt-4.14.0-115.el7a.0.1.src.rpm
+$ wget https://archive.kernel.org/centos-vault/altarch/7.6.1810/os/Source/SPackages/kernel-alt-4.14.0-115.el7a.0.1.src.rpm
+$ rpm -ivh kernel-alt-4.14.0-115.el7a.0.1.src.rpm
+
+# Add these patches to SOURCES directory
+$ cp -f *patch ~/rpmbuild/SOURCES/
+$ cp -f kernel-alt-4.14.0-aarch64.config ~/rpmbuild/SOURCES/
+$ cp -f kernel-alt-4.14.0-aarch64-debug.config ~/rpmbuild/SOURCES/
+
+# Replace spec by using spec here
+$ cp -f kernel-alt.spec ~/rpmbuild/SPECS/
+
+# Start rpmbuilding
+$ cd ~/rpmbuild/SPECS/
+$ rpmbuild -bb kernel-alt.spec
+$ cd ~/rpmbuild/RPMS/aarch64
+$ rpm -ivh --force kernel-4.14.0-115.el7.0.1.aarch64.rpm

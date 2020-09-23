@@ -1,0 +1,146 @@
+From d0b35d50e45a9459bcc028aae658112d903c9a82 Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Wed, 23 Sep 2020 16:49:36 +0800
+Subject: [PATCH 15/25] KVM: arm64: Implement PV_SCHED_KICK_CPU call
+
+euleros inclusion
+category: feature
+bugzilla: NA
+DTS: #231
+CVE: NA
+
+--------------------------------
+
+Implement the service call for waking up a WFI state vCPU.
+---
+ arch/arm/include/asm/kvm_host.h   |  5 +++++
+ arch/arm64/include/asm/kvm_host.h |  2 ++
+ arch/arm64/kvm/handle_exit.c      |  1 +
+ virt/kvm/arm/arm.c                |  4 +++-
+ virt/kvm/arm/hypercalls.c         |  3 +++
+ virt/kvm/arm/pvsched.c            | 25 +++++++++++++++++++++++++
+ 6 files changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/include/asm/kvm_host.h b/arch/arm/include/asm/kvm_host.h
+index d1f829c..106d226 100644
+--- a/arch/arm/include/asm/kvm_host.h
++++ b/arch/arm/include/asm/kvm_host.h
+@@ -294,6 +294,11 @@ static inline int kvm_hypercall_pvsched_features(struct kvm_vcpu *vcpu)
+ 	return SMCCC_RET_NOT_SUPPORTED;
+ }
+ 
++static inline int kvm_pvsched_kick_vcpu(struct kvm_vcpu *vcpu)
++{
++	return SMCCC_RET_NOT_SUPPORTED;
++}
++
+ void kvm_mmu_wp_memory_region(struct kvm *kvm, int slot);
+ 
+ struct kvm_vcpu *kvm_mpidr_to_vcpu(struct kvm *kvm, unsigned long mpidr);
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 678dd16..af06b76 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -290,6 +290,7 @@ struct kvm_vcpu_arch {
+ 
+ 	/* Guest PV sched state */
+ 	struct {
++		bool pv_unhalted;
+ 		gpa_t base;
+ 	} pvsched;
+ };
+@@ -373,6 +374,7 @@ static inline bool kvm_arm_is_pvsched_enabled(struct kvm_vcpu_arch *vcpu_arch)
+ 
+ void kvm_update_pvsched_preempted(struct kvm_vcpu *vcpu, u32 preempted);
+ int kvm_hypercall_pvsched_features(struct kvm_vcpu *vcpu);
++int kvm_pvsched_kick_vcpu(struct kvm_vcpu *vcpu);
+ 
+ struct kvm_vcpu *kvm_mpidr_to_vcpu(struct kvm *kvm, unsigned long mpidr);
+ 
+diff --git a/arch/arm64/kvm/handle_exit.c b/arch/arm64/kvm/handle_exit.c
+index 1d8c790..c7bda7c 100644
+--- a/arch/arm64/kvm/handle_exit.c
++++ b/arch/arm64/kvm/handle_exit.c
+@@ -106,6 +106,7 @@ static int kvm_handle_wfx(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ 	} else {
+ 		trace_kvm_wfx_arm64(*vcpu_pc(vcpu), false);
+ 		vcpu->stat.wfi_exit_stat++;
++		vcpu->arch.pvsched.pv_unhalted = false;
+ 		kvm_vcpu_block(vcpu);
+ 		kvm_clear_request(KVM_REQ_UNHALT, vcpu);
+ 	}
+diff --git a/virt/kvm/arm/arm.c b/virt/kvm/arm/arm.c
+index 80bce6e..7ec7ad4 100644
+--- a/virt/kvm/arm/arm.c
++++ b/virt/kvm/arm/arm.c
+@@ -424,7 +424,9 @@ int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
+  */
+ int kvm_arch_vcpu_runnable(struct kvm_vcpu *v)
+ {
+-	return ((!!v->arch.irq_lines || kvm_vgic_vcpu_pending_irq(v))
++	bool pv_unhalted = v->arch.pvsched.pv_unhalted;
++
++	return ((!!v->arch.irq_lines || kvm_vgic_vcpu_pending_irq(v) || pv_unhalted)
+ 		&& !v->arch.power_off && !v->arch.pause);
+ }
+ 
+diff --git a/virt/kvm/arm/hypercalls.c b/virt/kvm/arm/hypercalls.c
+index f708b54..7a6c5f1 100644
+--- a/virt/kvm/arm/hypercalls.c
++++ b/virt/kvm/arm/hypercalls.c
+@@ -60,6 +60,9 @@ int kvm_hvc_call_handler(struct kvm_vcpu *vcpu)
+ 		vcpu->arch.pvsched.base = GPA_INVALID;
+ 		val = SMCCC_RET_SUCCESS;
+ 		break;
++	case ARM_SMCCC_HV_PV_SCHED_KICK_CPU:
++		val = kvm_pvsched_kick_vcpu(vcpu);
++		break;
+ 	default:
+ 		return kvm_psci_call(vcpu);
+ 	}
+diff --git a/virt/kvm/arm/pvsched.c b/virt/kvm/arm/pvsched.c
+index 8a1302a..f8f8da9 100644
+--- a/virt/kvm/arm/pvsched.c
++++ b/virt/kvm/arm/pvsched.c
+@@ -38,6 +38,30 @@ void kvm_update_pvsched_preempted(struct kvm_vcpu *vcpu, u32 preempted)
+ 	pagefault_enable();
+ }
+ 
++int kvm_pvsched_kick_vcpu(struct kvm_vcpu *vcpu)
++{
++	unsigned int vcpu_idx;
++	int val = SMCCC_RET_NOT_SUPPORTED;
++	struct kvm *kvm = vcpu->kvm;
++	struct kvm_vcpu *target = NULL;
++
++	vcpu_idx = smccc_get_arg1(vcpu);
++	target = kvm_get_vcpu(kvm, vcpu_idx);
++	if (!target)
++		goto out;
++
++	target->arch.pvsched.pv_unhalted = true;
++	kvm_make_request(KVM_REQ_IRQ_PENDING, target);
++	kvm_vcpu_kick(target);
++	if (READ_ONCE(target->ready))
++		kvm_vcpu_yield_to(target);
++
++	val = SMCCC_RET_SUCCESS;
++
++out:
++	return val;
++}
++
+ int kvm_hypercall_pvsched_features(struct kvm_vcpu *vcpu)
+ {
+ 	u32 feature = smccc_get_arg1(vcpu);
+@@ -47,6 +71,7 @@ int kvm_hypercall_pvsched_features(struct kvm_vcpu *vcpu)
+ 	case ARM_SMCCC_HV_PV_SCHED_FEATURES:
+ 	case ARM_SMCCC_HV_PV_SCHED_IPA_INIT:
+ 	case ARM_SMCCC_HV_PV_SCHED_IPA_RELEASE:
++	case ARM_SMCCC_HV_PV_SCHED_KICK_CPU:
+ 		val = SMCCC_RET_SUCCESS;
+ 		break;
+ 	}
+-- 
+1.8.3.1
+
