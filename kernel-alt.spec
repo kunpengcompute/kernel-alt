@@ -485,7 +485,10 @@ Patch9072: 0022-locking-qspinlock-Merge-struct-__qspinlock-into-stru.patch
 Patch9073: 0023-locking-qspinlock-Fix-build-for-anonymous-union-in-o.patch
 Patch9074: 0024-KVM-arm64-Enable-PV-qspinlock.patch
 Patch9075: 0025-KVM-arm64-Add-tracepoints-for-PV-qspinlock.patch
-
+#Guest smt determination
+Patch10001: 0001-ACPICA-ACPI-6.3-PPTT-add-additional-fields-in-Proces.patch
+Patch10002: 0002-ACPI-PPTT-Add-support-for-ACPI-6.3-thread-flag.patch
+Patch10003: 0003-arm64-topology-Use-PPTT-to-determine-if-PE-is-a-thre.patch
 
 BuildRoot: %{_tmppath}/%{src_pkg_name}-%{KVRA}-root
 
@@ -901,6 +904,10 @@ git am %{PATCH9072}
 git am %{PATCH9073}
 git am %{PATCH9074}
 git am %{PATCH9075}
+
+git am %{PATCH10001}
+git am %{PATCH10002}
+git am %{PATCH10003}
 
 chmod +x scripts/checkpatch.pl
 
@@ -1760,6 +1767,9 @@ fi\
 %kernel_variant_files %{with_kdump} kdump
 
 %changelog
+* Thu Sep 24 2020 gaozhekang <864647692@qq.com>
+- Use PPTT to determine if PE is a thread
+
 * Wed Sep 23 2020 gaozhekang <864647692@qq.com>
 - Add pvsched feature to support vcpu preempt and pvqspinlock
 
