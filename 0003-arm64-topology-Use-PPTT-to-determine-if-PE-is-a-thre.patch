@@ -1,0 +1,61 @@
+From da1f72f1a66e41e85ccbf3d3a2c0101c46f4c156 Mon Sep 17 00:00:00 2001
+From: AltArch Kernel <noreply@centos.org>
+Date: Thu, 24 Sep 2020 16:15:40 +0800
+Subject: [PATCH 3/3] arm64: topology: Use PPTT to determine if PE is a thread
+
+ACPI 6.3 adds a thread flag to represent if a CPU/PE is
+actually a thread. Given that the MPIDR_MT bit may not
+represent this information consistently on homogeneous machines
+we should prefer the PPTT flag if its available.
+---
+ arch/arm64/kernel/topology.c | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kernel/topology.c b/arch/arm64/kernel/topology.c
+index eb2e6dd..cf29853 100644
+--- a/arch/arm64/kernel/topology.c
++++ b/arch/arm64/kernel/topology.c
+@@ -320,17 +320,28 @@ static void __init reset_cpu_topology(void)
+ }
+ 
+ #ifdef CONFIG_ACPI
++static bool __init acpi_cpu_is_threaded(int cpu)
++{
++	int is_threaded = acpi_pptt_cpu_is_thread(cpu);
++
++	/*
++	 * if the PPTT doesn't have thread information, assume a homogeneous
++	 * machine and return the current CPU's thread state.
++	 */
++	if (is_threaded < 0)
++		is_threaded = read_cpuid_mpidr() & MPIDR_MT_BITMASK;
++
++	return !!is_threaded;
++}
++
+ /*
+  * Propagate the topology information of the processor_topology_node tree to the
+  * cpu_topology array.
+  */
+ static int __init parse_acpi_topology(void)
+ {
+-	bool is_threaded;
+ 	int cpu, topology_id;
+ 
+-	is_threaded = read_cpuid_mpidr() & MPIDR_MT_BITMASK;
+-
+ 	for_each_possible_cpu(cpu) {
+ 		int i, cache_id;
+ 
+@@ -338,7 +349,7 @@ static int __init parse_acpi_topology(void)
+ 		if (topology_id < 0)
+ 			return topology_id;
+ 
+-		if (is_threaded) {
++		if (acpi_cpu_is_threaded(cpu)) {
+ 			cpu_topology[cpu].thread_id = topology_id;
+ 			topology_id = find_acpi_cpu_topology(cpu, 1);
+ 			cpu_topology[cpu].core_id   = topology_id;
+-- 
+1.8.3.1
+
